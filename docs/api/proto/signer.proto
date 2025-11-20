@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package signer.v1;
+option go_package = "github.com/aegis-sign/wallet/signer/v1;signerv1";
+
+// create/sign 核心接口；SignStream 用于双向流、长连接与微批聚合。
+
+enum DigestEncoding {
+  DIGEST_ENCODING_UNSPECIFIED = 0;
+  DIGEST_ENCODING_HEX = 1;
+  DIGEST_ENCODING_BASE64 = 2;
+}
+
+enum ApiErrorCode {
+  API_ERROR_CODE_UNSPECIFIED = 0;
+  API_ERROR_CODE_INVALID_ARGUMENT = 1;
+  API_ERROR_CODE_RETRY_LATER = 2;
+  API_ERROR_CODE_UNLOCK_REQUIRED = 3;
+  API_ERROR_CODE_INVALID_KEY = 4;
+}
+
+message AuditContext {
+  // 仅审计模式启用，默认禁用
+  string request_id = 1;
+  string tenant_id = 2;
+}
+
+message CreateRequest {
+  string curve = 1; // 默认 secp256k1
+  AuditContext audit_context = 100;
+}
+
+message CreateResponse {
+  string key_id = 1;      // 生成的密钥标识
+  bytes  public_key = 2;  // 公钥（压缩 33B 或未压缩 65B）
+  string address = 3;     // 可选地址
+}
+
+message SignRequest {
+  string key_id = 1;
+  bytes  digest = 2;               // 必须为 32 字节摘要（调用方保证）
+  DigestEncoding encoding = 3;     // 默认为 HEX
+  AuditContext audit_context = 100;
+}
+
+message SignResponse {
+  bytes  signature = 1;   // DER 或 64B raw（由实现配置）
+  uint32 rec_id   = 2;    // 可选恢复 id（0-3）
+}
+
+message ErrorStatus {
+  ApiErrorCode code = 1;
+  string message = 2;
+  string retry_after = 3; // 与 HTTP Retry-After 对齐
+}
+
+service SignerService {
+  rpc Create(CreateRequest) returns (CreateResponse);
+  rpc Sign(SignRequest) returns (SignResponse);
+  rpc SignStream(stream SignRequest) returns (stream SignResponse);
+}

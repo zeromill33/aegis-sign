@@ -1,0 +1,15 @@
+schema: 1
+story: "1.1"
+story_title: "API 合约"
+gate: "PASS"
+status_reason: "INVALID_KEY 错误码、入口校验与示例/CI 均已补齐，make api-ci 验证通过。"
+reviewer: "Quinn (Test Architect)"
+updated: "2025-11-20T05:28:39Z"
+waiver: { active: false }
+top_issues: []
+risk_summary:
+  totals: { critical: 0, high: 0, medium: 0, low: 0 }
+  recommendations:
+    must_fix: []
+    monitor:
+      - "若后续需区分 INVALID_KEY 的 404/409 语义，可在 apierrors 中加入可配置 HTTP status。"

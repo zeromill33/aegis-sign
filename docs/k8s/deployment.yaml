@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wallet-signer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: signer-config
+  namespace: wallet-signer
+data:
+  SIGN_CONN_POOL_MIN: "16"
+  SIGN_CONN_POOL_MAX: "32"
+  SIGN_TTL_SOFT_PLAIN: "15m"
+  SIGN_TTL_HARD_PLAIN: "16m"
+  SIGN_TTL_SOFT_DEK: "55m"
+  SIGN_TTL_HARD_DEK: "60m"
+  SIGN_REHYDRATE_WAIT_BUDGET_MS: "3"
+  SIGN_HARD_REFRESH_BUDGET_MS: "5"
+  SIGN_REFRESH_WINDOW: "2m"
+  SIGN_REFRESH_LOW_WATER: "500"
+  SIGN_REFRESH_JITTER: "0.1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signer
+  namespace: wallet-signer
+  labels:
+    app: signer
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: signer }
+  template:
+    metadata:
+      labels: { app: signer }
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      nodeSelector:
+        node.kubernetes.io/instance-type: "c6i.xlarge"  # 示例，按需调整
+        # 自定义：nitro=true（为支持 Nitro 的节点打标签）
+      tolerations:
+        - key: "nitro-only"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: signer
+          image: yourrepo/signer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080 # HTTP
+            - containerPort: 9090 # gRPC
+          envFrom:
+            - configMapRef: { name: signer-config }
+          resources:
+            requests:
+              cpu: "6"
+              memory: "8Gi"
+            limits:
+              cpu: "6"
+              memory: "8Gi"
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signer
+  namespace: wallet-signer
+spec:
+  selector: { app: signer }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: grpc
+      port: 9090
+      targetPort: 9090
+

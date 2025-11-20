@@ -1,0 +1,101 @@
+# 通用忽略规则（跨平台/多语言）
+
+######## 操作系统 ########
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+######## 编辑器/IDE ########
+.idea/
+.vscode/
+.history/
+*.swp
+*.swo
+*.swn
+*~
+.fleet/
+.project
+.settings/
+.classpath
+.factorypath
+
+######## Node/前端 ########
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.eslintcache
+.stylelintcache
+.parcel-cache/
+.turbo/
+.cache/
+.tsbuildinfo
+
+# 构建产物
+dist/
+build/
+out/
+.next/
+.nuxt/
+.output/
+
+# Yarn Berry/Plug'n'Play
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# 测试与覆盖率
+coverage/
+.nyc_output/
+cypress/screenshots/
+cypress/videos/
+
+######## Python ########
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+######## Go/Rust/Java 等 ########
+# Go
+bin/
+pkg/
+coverage.out
+
+# Rust
+target/
+
+# Java/Gradle
+.gradle/
+
+######## 环境变量/本地配置 ########
+.env
+.env.local
+.env.*.local
+.envrc
+!.env.example
+
+######## 日志/临时文件 ########
+logs/
+*.log
+tmp/
+.tmp/
+temp/
+
+######## BMAD/Codex（本地缓存/可再生产物） ########
+# 注意：本仓库需要提交 .bmad-core 以支持 Web/IDE 集成，请勿忽略 .bmad-core/
+# 如本地有自定义缓存目录，可在下方补充：
+# .bmad-cache/
+# .bmad-local/

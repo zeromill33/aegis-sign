@@ -1,0 +1,203 @@
+openapi: 3.0.3
+info:
+  title: Wallet Signer API
+  version: 0.2.0
+  description: |
+    create/sign 核心路径的最小化 API。`/sign` 仅接受 32B 摘要（hex/base64），`/create` 响应预算 ≤ 5ms（不含后台持久化）。
+    错误码集合：INVALID_ARGUMENT（400）、RETRY_LATER（429）、UNLOCK_REQUIRED（503）、INVALID_KEY（404/409）。
+servers:
+  - url: /
+paths:
+  /create:
+    post:
+      summary: 创建密钥对并返回标识与公钥
+      tags: [signer]
+      description: |
+        `POST /create` 返回 `{keyId, publicKey, address?}`，响应预算 ≤ 5ms（不含后台持久化）。
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateResponse'
+        '429': { $ref: '#/components/responses/RetryLater' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /sign:
+    post:
+      summary: 使用 keyId 对 32B 摘要进行签名
+      tags: [signer]
+      description: |
+        `POST /sign` 仅接受 32B `digest`；非 32B 直接返回 INVALID_ARGUMENT/400。request-id/tenant-id 头部默认禁用，仅审计模式启用。
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResponse'
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '429': { $ref: '#/components/responses/RetryLater' }
+        '503': { $ref: '#/components/responses/UnlockRequired' }
+        '404': { $ref: '#/components/responses/InvalidKey' }
+        '409': { $ref: '#/components/responses/InvalidKey' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+components:
+  schemas:
+    CreateRequest:
+      type: object
+      properties:
+        curve:
+          type: string
+          description: 椭圆曲线，默认 secp256k1
+          default: secp256k1
+        auditHeaders:
+          type: object
+          description: 可选审计头部；默认禁用
+          properties:
+            requestId:
+              type: string
+              description: 对应 `x-request-id`
+            tenantId:
+              type: string
+              description: 对应 `x-tenant-id`
+      additionalProperties: false
+    CreateResponse:
+      type: object
+      required: [keyId, publicKey]
+      properties:
+        keyId:
+          type: string
+          description: 密钥标识
+          example: plainkey-01HZYQTB6
+        publicKey:
+          type: string
+          description: 公钥（hex/base64，具体由实现决定）
+          examples:
+            hex: '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+            base64: 'Ani+Zn759y7sVaBilhaHcLcCmfzbLc4o2VnygVsW+BeY'
+        address:
+          type: string
+          description: 可选地址（如链地址）
+          example: 0x1234d8d0a60d5f2a8dd0f37edc26a1b6ce1df4b5
+    SignRequest:
+      type: object
+      required: [keyId, digest]
+      properties:
+        keyId:
+          type: string
+          description: "`POST /create` 返回的 keyId"
+        digest:
+          description: "32B 摘要，按 `encoding` 指定的编码（默认 hex64）"
+          oneOf:
+            - $ref: '#/components/schemas/HexDigest'
+            - $ref: '#/components/schemas/Base64Digest'
+        encoding:
+          type: string
+          enum: [hex, base64]
+          default: hex
+      additionalProperties: false
+    SignResponse:
+      type: object
+      required: [signature]
+      properties:
+        signature:
+          type: string
+          description: 签名（DER 或 64B raw，具体由实现决定）
+        recId:
+          type: integer
+          format: int32
+          nullable: true
+          description: 可选恢复 id
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: 业务错误码（INVALID_ARGUMENT/RETRY_LATER/UNLOCK_REQUIRED/INVALID_KEY/...）
+        message:
+          type: string
+        retryAfterHint:
+          type: string
+          description: 当需要退避时提供建议值（与 `Retry-After` 一致）
+    HexDigest:
+      type: string
+      description: Hex64 表达的 32 字节摘要
+      pattern: '^[0-9a-fA-F]{64}$'
+      example: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
+    Base64Digest:
+      type: string
+      description: Base64 表达的 32 字节摘要
+      minLength: 44
+      maxLength: 44
+      pattern: '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=?$'
+      example: AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
+  responses:
+    InvalidArgument:
+      description: 参数非法（digest 非 32B 等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RetryLater:
+      description: 稍后重试（全局限流/瞬时错误），HTTP 429
+      headers:
+        Retry-After:
+          schema: { type: string }
+          description: 建议的退避时间（秒/HTTP 日期）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnlockRequired:
+      description: 需要后台解锁（KMS 冷路径），HTTP 503
+      headers:
+        Retry-After:
+          schema: { type: string }
+          description: 建议的退避时间（秒/HTTP 日期）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidKey:
+      description: keyId 不存在或状态不允许（网关可映射为 404 或 409）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: 服务器内部错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  parameters:
+    RequestId:
+      name: x-request-id
+      in: header
+      description: 仅审计场景启用的幂等/追踪 ID（默认禁用）
+      required: false
+      schema:
+        type: string
+    TenantId:
+      name: x-tenant-id
+      in: header
+      description: 多租户标识，仅审计或专用场景启用，默认禁用
+      required: false
+      schema:
+        type: string

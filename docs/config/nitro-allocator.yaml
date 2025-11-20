@@ -1,0 +1,7 @@
+# 将本文件下发到每个支持 Nitro Enclaves 的节点：/etc/nitro_enclaves/allocator.yaml
+# 并重启 nitro-enclaves-allocator 服务以生效。
+
+memory_mib: 8192   # Enclave 内存（MiB）
+cpu_count: 12      # 分配给 Enclave 的 vCPU 数
+# 其他参数视环境追加（如：hugepages、设备路径、socket_path 等）
+
