@@ -41,6 +41,7 @@
 - **父机 → Enclave（vsock 上的 gRPC）**
   - **双向流式**优先（或 unary 长连接 + 连接池）。**每 Enclave 维持 16–32 条**长连接，KeepAlive 开启。  
   - **仅传 32B digest** 与最少元数据，避免 JSON/复制。
+  - 连接池实现落在 `internal/infra/enclaveclient`，支持 `Acquire/Release`、健康探测、<200 ms 断线重连（环境变量 `SIGN_CONN_POOL_*` 可热更新）。
 
 ### A2. 签名引擎与并发模型（vCPU 等量并行 + 微批）
 - **Worker = vCPU**：Enclave 预留 `N` vCPU，就起 `N` 个工作线程；每线程：
@@ -95,7 +96,7 @@ sf.Do(keyId, func() (any, error) { return nil, refresh(keyId) })
 
 ### A5. 父机网关与路由
 - **一致性哈希粘性路由**：`keyId -> enclave`，确保缓存命中。  
-- **连接池**：对每个 Enclave 维持 **16–32** 条 gRPC/HTTP2 长连接（KeepAlive、MaxConcurrentStreams 调大）。  
+- **连接池**：对每个 Enclave 维持 **16–32** 条 gRPC/HTTP2 长连接（KeepAlive、MaxConcurrentStreams 调大）。`internal/infra/enclaveclient` 暴露 `Drain/Resize`，S9 可以直接复用其 target 抽象。  
 - **遇到 `NEEDS_UNLOCK`**：网关**立即异步**调用 `Unlock(keyId)`，并向客户端返回可重试错误（带 `Retry-After: 50–200ms` 抖动）。
 
 ### A6. 资源与调度（EKS + Nitro 配置）
@@ -117,6 +118,7 @@ sf.Do(keyId, func() (any, error) { return nil, refresh(keyId) })
   - 网关：`sign_latency_ms{phase=queue|rpc|vsock|enclave|total}`、`inflight`、`retry_rate`、`conn_pool_active`。  
   - Enclave：`engine_q_depth`、`batch_size`、`sign_cpu_us`、`rehydrate_latency_ms`、`state_count{WARM|COOL|INVALID}`、`rng_source`。  
   - 刷新：`refresh_total`、`refresh_fail_total`、`refresh_latency_ms`、`NEEDS_UNLOCK_total`、`grace_sign_total`。
+  - 连接池专项指标：`active_conns{enclave}`、`grpc_stream_resets_total{enclave}`、`pool_acquire_latency_ms{enclave}`，Grafana 告警阈值见 `docs/runbook/conn-pool.md`。
 - **SLO 报表**：p50/p90/p95/p99；`NEEDS_UNLOCK_rate < 0.5%`。  
 - **日志**：EXPIRED 命中、grace 签名、解锁失败均需结构化审计。
 

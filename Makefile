@@ -19,5 +19,20 @@ api-ci:
 	    git diff --quiet -- docs/api/gen/go || (echo "proto outputs not up-to-date" && exit 1); \
 	  fi; \
 	fi
-	$(GO) test ./pkg/signerapi -run TestCreateFastPathBudget -count=1
-	$(GO) test ./pkg/... ./docs/api/tests
+	$(GO) test ./internal/api -run TestCreateFastPathBudget -count=1
+	$(GO) test ./pkg/... ./internal/... ./docs/api/tests
+
+.PHONY: conn-pool-test
+conn-pool-test:
+	$(GO) test ./internal/infra/enclaveclient -run TestConnPoolRace -race -count=1
+	$(GO) test ./internal/infra/enclaveclient ./internal/api
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+	  golangci-lint run ./pkg/... ; \
+	else \
+	  echo "golangci-lint not installed, skipping lint"; \
+	fi
+	@if command -v ghz >/dev/null 2>&1; then \
+	  echo "running ghz smoke" && ghz --help >/dev/null; \
+	else \
+	  echo "ghz not installed - follow docs/bench/s2-long-connection.md"; \
+	fi

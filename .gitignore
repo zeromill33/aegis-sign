@@ -71,7 +71,6 @@ __pycache__/
 ######## Go/Rust/Java 等 ########
 # Go
 bin/
-pkg/
 coverage.out
 
 # Rust
