@@ -1,0 +1,16 @@
+schema: 1
+story: '2.2'
+story_title: '单航班刷新（single-flight）'
+gate: 'PASS'
+status_reason: 'singleflight 刷新、等待预算与预刷新器均具备实现与测试覆盖，运维文档也补充完成，可进入 Done 流程。'
+reviewer: 'Quinn (Test Architect)'
+updated: '2025-11-21T03:00:00Z'
+waiver: { active: false }
+top_issues: []
+risk_summary:
+  totals: { critical: 0, high: 0, medium: 0, low: 0 }
+  recommendations:
+    must_fix: []
+    monitor:
+      - '后续将 Prefetcher 的 EntryIterator/Start 接入实际 key cache manager，并在上线前留存一次 S4 压测与 Grafana 截图。'
+examples: {}

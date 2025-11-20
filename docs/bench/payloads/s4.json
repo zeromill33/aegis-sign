@@ -1,0 +1,9 @@
+{
+  "key_id": "k-demo",
+  "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "refresh_profile": {
+    "soft_expire_ratio": 0.1,
+    "hard_expire_ratio": 0.01,
+    "burst_seconds": 90
+  }
+}

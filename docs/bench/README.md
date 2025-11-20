@@ -42,3 +42,27 @@ ghz --insecure \
 - NEEDS_UNLOCK_rate 偏高：检查单航班刷新与预刷新参数（S4）
 - CPU > 75%：调整 worker 数、批处理策略、对象池与 GC 压力
 
+## S4 单航班刷新专项压测
+- 场景：随机 10% key 在 90s 内触发 soft 过期，1% 触发 hard 过期，验证 `singleflight_waiters`、`singleflight_wait_timeout_total` 与 `rehydrate_latency_ms`。
+- 建议命令：
+```bash
+ghz --insecure \
+  --proto docs/api/proto/signer.proto \
+  --call signer.v1.SignerService.Sign \
+  -c 500 -z 15m \
+  -d @docs/bench/payloads/s4.json \
+  --metadata "refresh_mode=singleflight" \
+  $HOST:9090
+```
+- 验收：`rehydrate_latency_ms{keyspace}` p95 < 2ms；`singleflight_waiters` 稳态 < 128；`singleflight_wait_timeout_total` 每分钟 < 10；`NEEDS_UNLOCK_rate < 0.5%`。
+- 模拟建议：将 `SIGN_TTL_SOFT_PLAIN`/`SIGN_TTL_HARD_PLAIN` 临时降到 30s/31s，并把 `SIGN_REHYDRATE_WAIT_BUDGET_MS` 写入 ConfigMap 以覆盖默认 3ms，这样可快速观察 soft/hard 过期触发；压测完成后立即恢复生产值。
+- 记录输出：
+  ```bash
+  ghz ... --format json > docs/bench/reports/s4-$(date +%Y%m%d%H%M).json
+  ```
+  同时抓取 Prometheus 快照：
+  ```bash
+  promtool query instant http://prometheus:9090 \
+    'singleflight_waiters{keyspace="prod"}' > docs/bench/reports/s4-waiters.txt
+  ```
+- 指标观察：按照 `docs/runbook/key-cache.md` 的 PromQL 示例在 Grafana 建立 “Singleflight Health” dashboard，将压测期间的 p95、waiters、timeout 等曲线截图归档至 `docs/bench/reports/`。

@@ -45,7 +45,7 @@ type EntryConfig struct {
 	Metrics       *Metrics
 	Logger        *slog.Logger
 	Rehydrator    Rehydrator
-	Notifier      StaleNotifier
+	Refresher     RefreshScheduler
 }
 
 // Entry 表示单个 key cache 元素。
@@ -66,7 +66,7 @@ type Entry struct {
 	metrics    *Metrics
 	logger     *slog.Logger
 	rehydrator Rehydrator
-	notifier   StaleNotifier
+	refresher  RefreshScheduler
 
 	mu            sync.Mutex
 	priv32        [32]byte
@@ -136,8 +136,8 @@ func NewEntry(cfg EntryConfig) (*Entry, error) {
 	if cfg.Rehydrator == nil {
 		cfg.Rehydrator = NoopRehydrator{}
 	}
-	if cfg.Notifier == nil {
-		cfg.Notifier = StaleNotifierFunc(func(string) {})
+	if cfg.Refresher == nil {
+		cfg.Refresher = NoopScheduler{}
 	}
 	createdAt := cfg.CreatedAt
 	if createdAt.IsZero() {
@@ -157,7 +157,7 @@ func NewEntry(cfg EntryConfig) (*Entry, error) {
 		metrics:       cfg.Metrics,
 		logger:        cfg.Logger,
 		rehydrator:    cfg.Rehydrator,
-		notifier:      cfg.Notifier,
+		refresher:     cfg.Refresher,
 		hasPlainKey:   cfg.HasPlainKey,
 		usesLeft:      cfg.UsesLeft,
 		softTTL:       createdAt.Add(cfg.PlainSoftTTL),
@@ -179,66 +179,49 @@ func NewEntry(cfg EntryConfig) (*Entry, error) {
 
 // Checkout 执行一次签名前的检查与状态迁移。
 func (e *Entry) Checkout(ctx context.Context) (CheckoutResult, error) {
-	var notify bool
-	res, err := e.checkoutInner(ctx, &notify)
-	if notify && e.notifier != nil {
-		e.notifier.Notify(e.keyID)
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return res, err
-}
+	for {
+		e.mu.Lock()
+		result := CheckoutResult{KeyID: e.keyID, State: e.state}
+		now := e.clock.Now()
 
-func (e *Entry) checkoutInner(ctx context.Context, notify *bool) (CheckoutResult, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	result := CheckoutResult{KeyID: e.keyID, State: e.state}
-	now := e.clock.Now()
-
-	if now.After(e.dekValidUntil) {
-		e.toInvalidLocked("DEK expired")
-		return result, apierrors.New(apierrors.CodeUnlockRequired, "dek expired")
-	}
-
-	if e.state == StateInvalid {
-		return result, apierrors.New(apierrors.CodeUnlockRequired, "key invalid")
-	}
-
-	// COOL 状态需要同步再水合。
-	if !e.hasPlainKey {
-		if err := e.rehydrateLocked(ctx, now); err != nil {
-			return CheckoutResult{KeyID: e.keyID, State: e.state}, err
+		if err := e.ensureValidLocked(now); err != nil {
+			e.mu.Unlock()
+			return result, err
 		}
-	}
 
-	// Hard TTL 或 Uses 耗尽需要立即刷新。
-	if now.After(e.hardTTL) || e.usesLeft == 0 {
-		e.toCoolLocked("hard ttl reached")
-		if err := e.rehydrateLocked(ctx, now); err != nil {
-			return CheckoutResult{KeyID: e.keyID, State: e.state}, err
+		if !e.hasPlainKey || now.After(e.hardTTL) || e.usesLeft == 0 {
+			e.mu.Unlock()
+			callCtx, cancel := e.refreshContext(ctx)
+			err := e.refresher.Do(callCtx, e.keyspace, e.keyID, e.refreshOnce)
+			cancel()
+			if err != nil {
+				if _, ok := apierrors.FromError(err); ok {
+					return result, err
+				}
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return result, apierrors.New(apierrors.CodeUnlockRequired, "refresh timeout")
+				}
+				return result, err
+			}
+			continue
 		}
-	}
 
-	if !e.hasPlainKey {
-		return CheckoutResult{KeyID: e.keyID, State: e.state}, apierrors.New(apierrors.CodeUnlockRequired, "plain key unavailable")
-	}
+		e.usesLeft--
+		result.State = StateWarm
+		result.HasPlainKey = true
+		result.PlainKey = e.priv32
 
-	if e.usesLeft == 0 {
-		return CheckoutResult{KeyID: e.keyID, State: e.state}, apierrors.New(apierrors.CodeUnlockRequired, "uses exhausted")
-	}
+		shouldBackground := e.shouldScheduleRefreshLocked(now)
+		e.mu.Unlock()
 
-	e.usesLeft--
-	result.State = StateWarm
-	result.HasPlainKey = true
-	result.PlainKey = e.priv32
-
-	lowWater := e.lowWater
-	if e.maxUses <= lowWater {
-		lowWater = 0
+		if shouldBackground {
+			e.refresher.Go(context.Background(), e.keyspace, e.keyID, e.refreshOnce)
+		}
+		return result, nil
 	}
-	if (lowWater > 0 && e.usesLeft <= lowWater) || now.After(e.softTTL) {
-		*notify = true
-	}
-
-	return result, nil
 }
 
 // State 返回当前状态。
@@ -253,6 +236,79 @@ func (e *Entry) UsesLeft() uint32 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.usesLeft
+}
+
+func (e *Entry) ensureValidLocked(now time.Time) error {
+	if now.After(e.dekValidUntil) {
+		e.toInvalidLocked("DEK expired")
+		return apierrors.New(apierrors.CodeUnlockRequired, "dek expired")
+	}
+	if e.state == StateInvalid {
+		return apierrors.New(apierrors.CodeUnlockRequired, "key invalid")
+	}
+	return nil
+}
+
+func (e *Entry) shouldScheduleRefreshLocked(now time.Time) bool {
+	lowWater := e.lowWater
+	if e.maxUses <= lowWater {
+		lowWater = 0
+	}
+	if lowWater > 0 && e.usesLeft <= lowWater {
+		return true
+	}
+	return now.After(e.softTTL)
+}
+
+func (e *Entry) refreshContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	budget := e.refreshBudget
+	if budget <= 0 {
+		budget = defaultRefreshBudget
+	}
+	return context.WithTimeout(parent, budget)
+}
+
+func (e *Entry) refreshOnce(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.clock.Now()
+	if err := e.ensureValidLocked(now); err != nil {
+		return err
+	}
+	needCool := !e.hasPlainKey || now.After(e.hardTTL) || e.usesLeft == 0
+	if !needCool && now.Before(e.softTTL) && e.usesLeft > 0 {
+		// 仍然足够新鲜，直接返回。
+		return nil
+	}
+	if needCool {
+		e.toCoolLocked("refresh")
+	}
+	return e.rehydrateLocked(ctx, now)
+}
+
+func (e *Entry) shouldPrefetch(now time.Time, window time.Duration, lowWater uint32) bool {
+	if window <= 0 {
+		window = e.softWindow / 2
+	}
+	if lowWater == 0 {
+		lowWater = e.lowWater
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state != StateWarm {
+		return false
+	}
+	computedLowWater := lowWater
+	if e.maxUses <= computedLowWater {
+		computedLowWater = 0
+	}
+	if computedLowWater > 0 && e.usesLeft <= computedLowWater {
+		return true
+	}
+	return now.After(e.softTTL.Add(-window))
 }
 
 func (e *Entry) rehydrateLocked(ctx context.Context, now time.Time) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 
 func TestEntryCheckoutWarm(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
-	notifier := &recordingNotifier{}
 	plain := fixedPlain(0xAA)
 	metrics := NewMetrics(prometheus.NewRegistry())
 	entry, err := NewEntry(EntryConfig{
@@ -33,7 +33,6 @@ func TestEntryCheckoutWarm(t *testing.T) {
 		DEKValidFor:  time.Hour,
 		Clock:        clock,
 		Metrics:      metrics,
-		Notifier:     notifier,
 	})
 	require.NoError(t, err)
 
@@ -43,12 +42,11 @@ func TestEntryCheckoutWarm(t *testing.T) {
 	require.True(t, result.HasPlainKey)
 	require.Equal(t, uint32(9), entry.UsesLeft())
 	require.Equal(t, StateWarm, entry.State())
-	require.Zero(t, notifier.Len())
 }
 
-func TestEntrySoftTTLTriggersNotifier(t *testing.T) {
+func TestEntrySoftTTLTriggersBackgroundRefresh(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
-	notifier := &recordingNotifier{}
+	sched := &recordingScheduler{}
 	entry := mustEntry(t, EntryConfig{
 		KeyID:        "key-soft",
 		Enclave:      "enc",
@@ -62,13 +60,13 @@ func TestEntrySoftTTLTriggersNotifier(t *testing.T) {
 		PlainHardTTL: time.Second,
 		DEKValidFor:  time.Hour,
 		Clock:        clock,
-		Notifier:     notifier,
+		Refresher:    sched,
 	})
 
 	clock.Advance(2 * time.Millisecond)
 	_, err := entry.Checkout(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 1, notifier.Len())
+	require.Equal(t, 1, sched.GoCalls())
 }
 
 func TestEntryHardTTLTriggersRehydrate(t *testing.T) {
@@ -96,6 +94,115 @@ func TestEntryHardTTLTriggersRehydrate(t *testing.T) {
 	require.Equal(t, fixedPlain(0xBB), res.PlainKey)
 	require.Equal(t, uint32(3), entry.UsesLeft())
 	require.Equal(t, 1, stub.Calls())
+}
+
+func TestEntryConcurrentRefreshSingleflight(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	metrics := NewMetrics(prometheus.NewRegistry())
+	group := NewRefreshGroup(metrics, nil)
+	stub := &stubRehydrator{plain: fixedPlain(0xCC)}
+	entry := mustEntry(t, EntryConfig{
+		KeyID:       "key-sf",
+		Enclave:     "enc",
+		Keyspace:    "prod",
+		HasPlainKey: false,
+		CipherBlob:  []byte("cipher"),
+		Clock:       clock,
+		Rehydrator:  stub,
+		Metrics:     metrics,
+		Refresher:   group,
+	})
+
+	const workers = 4
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := entry.Checkout(context.Background())
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, stub.Calls())
+}
+
+func TestEntryRefreshTimeoutIncrementsWaiterMetric(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	metrics := NewMetrics(prometheus.NewRegistry())
+	group := NewRefreshGroup(metrics, nil)
+	slow := &slowRehydrator{delay: 10 * time.Millisecond}
+	entry := mustEntry(t, EntryConfig{
+		KeyID:       "key-timeout",
+		Enclave:     "enc",
+		Keyspace:    "prod",
+		HasPlainKey: false,
+		CipherBlob:  []byte("cipher"),
+		Clock:       clock,
+		Rehydrator:  slow,
+		Metrics:     metrics,
+		Refresher:   group,
+	})
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := entry.Checkout(context.Background())
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.Error(t, err)
+		apiErr, ok := apierrors.FromError(err)
+		require.True(t, ok)
+		require.Equal(t, apierrors.CodeUnlockRequired, apiErr.Code)
+	}
+	require.Equal(t, 1, slow.Calls())
+	waitTimeout := metrics.singleflightTimeouts.WithLabelValues("prod")
+	require.GreaterOrEqual(t, testutil.ToFloat64(waitTimeout), 1.0)
+}
+
+func TestEntryRefreshContextUsesDefaultBudget(t *testing.T) {
+	entry := mustEntry(t, EntryConfig{
+		KeyID:       "key-budget-default",
+		Enclave:     "enc",
+		Keyspace:    "prod",
+		HasPlainKey: true,
+		PlainKey:    fixedPlain(0x11),
+	})
+	ctx, cancel := entry.refreshContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	remaining := time.Until(deadline)
+	require.InDelta(t, float64(3*time.Millisecond), float64(remaining), float64(2*time.Millisecond))
+}
+
+func TestEntryRefreshContextUsesCustomBudget(t *testing.T) {
+	entry := mustEntry(t, EntryConfig{
+		KeyID:         "key-budget-custom",
+		Enclave:       "enc",
+		Keyspace:      "prod",
+		HasPlainKey:   true,
+		PlainKey:      fixedPlain(0x12),
+		RefreshBudget: 7 * time.Millisecond,
+	})
+	ctx, cancel := entry.refreshContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	remaining := time.Until(deadline)
+	require.InDelta(t, float64(7*time.Millisecond), float64(remaining), float64(2*time.Millisecond))
 }
 
 func TestEntryRehydrateFailureMarksInvalid(t *testing.T) {
@@ -204,21 +311,50 @@ func (s *stubRehydrator) LastBlob() []byte {
 	return s.last
 }
 
-type recordingNotifier struct {
-	mu   sync.Mutex
-	keys []string
+type slowRehydrator struct {
+	delay time.Duration
+	calls int32
 }
 
-func (n *recordingNotifier) Notify(keyID string) {
-	n.mu.Lock()
-	n.keys = append(n.keys, keyID)
-	n.mu.Unlock()
+func (s *slowRehydrator) Rehydrate(ctx context.Context, _ string, _ []byte) ([32]byte, error) {
+	atomic.AddInt32(&s.calls, 1)
+	select {
+	case <-time.After(s.delay):
+		return fixedPlain(0xDD), nil
+	case <-ctx.Done():
+		return [32]byte{}, ctx.Err()
+	}
 }
 
-func (n *recordingNotifier) Len() int {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return len(n.keys)
+func (s *slowRehydrator) Calls() int {
+	return int(atomic.LoadInt32(&s.calls))
+}
+
+type recordingScheduler struct {
+	mu      sync.Mutex
+	goCalls int
+}
+
+func (s *recordingScheduler) Go(ctx context.Context, _ string, _ string, fn RefreshFunc) {
+	s.mu.Lock()
+	s.goCalls++
+	s.mu.Unlock()
+	if fn != nil {
+		go fn(ctx)
+	}
+}
+
+func (recordingScheduler) Do(ctx context.Context, _ string, _ string, fn RefreshFunc) error {
+	if fn == nil {
+		return nil
+	}
+	return fn(ctx)
+}
+
+func (s *recordingScheduler) GoCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.goCalls
 }
 
 func fixedPlain(val byte) [32]byte {
