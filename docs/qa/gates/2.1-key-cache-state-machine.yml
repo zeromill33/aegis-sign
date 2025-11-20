@@ -1,0 +1,29 @@
+story: 2.1.key-cache-state-machine
+status: PASS
+score: 8.5
+confidence: medium
+summary: |
+  实现新增 key cache 状态机模块，覆盖 WARM/COOL/INVALID、TTL/Uses 驱动、再水合与指标，单测验证主要路径。总体满足 S3 目标，剩余风险可接受。
+findings:
+  critical: []
+  high:
+    - title: 缺少与单航班/解锁流程的接口契约
+      details: |
+        Entry 仅暴露 `StaleNotifier` 简单回调，没有定义 refresh channel/handle nor 与 Story 2.2/2.3 约定的 single-flight/UNLOCK_REQUIRED 交互。需确保下一故事能复用现有回调并提供文档说明，否则会在集成时反复修改。
+  medium:
+    - title: rehydrate Latency 测试未覆盖 >3ms 超时路径
+      details: |
+        单测只验证成功与失败，未模拟 `refresh_budget` 超时导致硬拒的行为；建议补充 fake rehydrator block > budget 确认会触发 `hard_expired_rejections_total` 以及 INVALID 状态。
+  low:
+    - title: 指标缺少 namespace/subsystem
+      details: |
+        新增的 `key_cache_state` 等指标未带 namespace/subsystem，容易与平台已有指标冲突，应在下一 patch 中对齐 `signer_*` 命名约定。
+  qa_notes: []
+next_steps:
+  - 与 Story 2.2/2.3 对齐接口，确保 notifier 能满足 single-flight 以及 `UNLOCK_REQUIRED` 异步流程。
+  - 补充超时/慢 rehydrate 场景测试，验证计数器与状态迁移。
+attached_artifacts:
+  - path: docs/stories/2.1.key-cache-state-machine.md
+  - path: internal/app/backend/keycache/entry.go
+  - path: internal/app/backend/keycache/entry_test.go
+  - path: internal/app/backend/keycache/metrics.go
