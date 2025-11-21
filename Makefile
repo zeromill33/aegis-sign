@@ -36,3 +36,18 @@ conn-pool-test:
 	else \
 	  echo "ghz not installed - follow docs/bench/s2-long-connection.md"; \
 	fi
+
+.PHONY: unlock-drill
+unlock-drill:
+	@echo "[unlock] running dispatcher/kms drills"
+	$(GO) test ./internal/gateway/unlock -run TestDispatcherRetriesUpToMaxAttempts -count=1
+	$(GO) test ./internal/infra/kms -run TestClientRetriesUntilSuccess -count=1
+	@ts=$$(date -u '+%Y-%m-%dT%H:%M:%SZ'); \
+	  mkdir -p docs/bench/reports; \
+	  { \
+	    echo "# Unlock Drill Report"; \
+	    echo "- Timestamp: $$ts"; \
+	    echo "- Tests: internal/gateway/unlock, internal/infra/kms"; \
+	    echo "- Next Steps: 1) ghz -d @docs/bench/payloads/unlock.json ... 2) 观察 unlock_* 指标 3) 更新 Grafana 截图"; \
+	  } > docs/bench/reports/unlock-drill.md; \
+	  echo "unlock drill report written to docs/bench/reports/unlock-drill.md"

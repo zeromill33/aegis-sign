@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/aegis-sign/wallet/pkg/apierrors"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -12,17 +13,35 @@ type RefreshGroup struct {
 	metrics *Metrics
 	logger  *slog.Logger
 	group   singleflight.Group
+	notify  UnlockNotifier
+}
+
+// RefreshGroupOption 自定义刷新器行为。
+type RefreshGroupOption func(*RefreshGroup)
+
+// WithUnlockNotifier 注入 UnlockNotifier。
+func WithUnlockNotifier(n UnlockNotifier) RefreshGroupOption {
+	return func(g *RefreshGroup) {
+		g.notify = n
+	}
 }
 
 // NewRefreshGroup 创建刷新协调器。
-func NewRefreshGroup(metrics *Metrics, logger *slog.Logger) *RefreshGroup {
+func NewRefreshGroup(metrics *Metrics, logger *slog.Logger, opts ...RefreshGroupOption) *RefreshGroup {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &RefreshGroup{
+	g := &RefreshGroup{
 		metrics: metrics,
 		logger:  logger,
+		notify:  defaultUnlockNotifier(),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(g)
+		}
+	}
+	return g
 }
 
 // Go 异步触发刷新。
@@ -74,6 +93,43 @@ func (g *RefreshGroup) Do(ctx context.Context, keyspace, keyID string, fn Refres
 		}
 		return ctx.Err()
 	case res := <-resultCh:
+		if err := res.Err; err != nil {
+			g.maybeNotifyUnlock(ctx, keyspace, keyID, err, !res.Shared)
+		}
 		return res.Err
+	}
+}
+
+func (g *RefreshGroup) maybeNotifyUnlock(ctx context.Context, keyspace, keyID string, err error, primary bool) {
+	if g == nil || !primary || keyID == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	notifier := g.notify
+	if notifier == nil {
+		notifier = defaultUnlockNotifier()
+	}
+	unlockErr, ok := AsUnlockRequired(err)
+	if !ok {
+		apiErr, apiErrOK := apierrors.FromError(err)
+		if !apiErrOK || apiErr.Code != apierrors.CodeUnlockRequired {
+			return
+		}
+		unlockErr = NewUnlockRequiredError(apiErr.Error(), defaultRefreshBudget)
+	}
+	reason := unlockErr.Reason()
+	if reason == "" {
+		reason = "unlock required"
+	}
+	event := UnlockEvent{
+		Keyspace:      keyspace,
+		KeyID:         keyID,
+		Reason:        reason,
+		RefreshBudget: unlockErr.RefreshBudget(),
+	}
+	if err := notifier.NotifyUnlock(ctx, event); err != nil && g.logger != nil {
+		g.logger.Warn("notify unlock failed", slog.String("key", keyID), slog.Any("err", err))
 	}
 }

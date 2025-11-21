@@ -1,0 +1,9 @@
+{
+  "key_id": "k-unlock-demo",
+  "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "unlock_profile": {
+    "needs_unlock_ratio": 0.01,
+    "burst_seconds": 120,
+    "jitter_ms": [50, 200]
+  }
+}

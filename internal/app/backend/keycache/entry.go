@@ -202,7 +202,7 @@ func (e *Entry) Checkout(ctx context.Context) (CheckoutResult, error) {
 					return result, err
 				}
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					return result, apierrors.New(apierrors.CodeUnlockRequired, "refresh timeout")
+					return result, e.newUnlockError("refresh timeout")
 				}
 				return result, err
 			}
@@ -241,10 +241,10 @@ func (e *Entry) UsesLeft() uint32 {
 func (e *Entry) ensureValidLocked(now time.Time) error {
 	if now.After(e.dekValidUntil) {
 		e.toInvalidLocked("DEK expired")
-		return apierrors.New(apierrors.CodeUnlockRequired, "dek expired")
+		return e.newUnlockError("dek expired")
 	}
 	if e.state == StateInvalid {
-		return apierrors.New(apierrors.CodeUnlockRequired, "key invalid")
+		return e.newUnlockError("key invalid")
 	}
 	return nil
 }
@@ -314,7 +314,7 @@ func (e *Entry) shouldPrefetch(now time.Time, window time.Duration, lowWater uin
 func (e *Entry) rehydrateLocked(ctx context.Context, now time.Time) error {
 	if e.rehydrator == nil {
 		e.toInvalidLocked("rehydrator missing")
-		return apierrors.New(apierrors.CodeUnlockRequired, "rehydrator missing")
+		return e.newUnlockError("rehydrator missing")
 	}
 	budget := e.refreshBudget
 	if budget <= 0 {
@@ -329,7 +329,7 @@ func (e *Entry) rehydrateLocked(ctx context.Context, now time.Time) error {
 	if err != nil {
 		e.metrics.incHardExpired(e.keyspace)
 		e.toInvalidLocked(fmt.Sprintf("rehydrate failed: %v", err))
-		return apierrors.New(apierrors.CodeUnlockRequired, "rehydrate failed")
+		return e.newUnlockError("rehydrate failed")
 	}
 	e.priv32 = plain
 	e.hasPlainKey = true
@@ -381,4 +381,12 @@ func secureZero(buf []byte) {
 	// 防止编译器优化掉填零。
 	subtle.ConstantTimeByteEq(buf[0], buf[0])
 	runtime.KeepAlive(buf)
+}
+
+func (e *Entry) newUnlockError(reason string) error {
+	budget := e.refreshBudget
+	if budget <= 0 {
+		budget = defaultRefreshBudget
+	}
+	return NewUnlockRequiredError(reason, budget)
 }

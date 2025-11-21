@@ -66,3 +66,11 @@ ghz --insecure \
     'singleflight_waiters{keyspace="prod"}' > docs/bench/reports/s4-waiters.txt
   ```
 - 指标观察：按照 `docs/runbook/key-cache.md` 的 PromQL 示例在 Grafana 建立 “Singleflight Health” dashboard，将压测期间的 p95、waiters、timeout 等曲线截图归档至 `docs/bench/reports/`。
+
+## Unlock Drill（异步解锁演练）
+- 目标：在 1% 请求上模拟 `UNLOCK_REQUIRED`，验证 `unlock_bg_rate`、`unlock_fail_total`、`unlock_latency_ms`、`retry-after-ms` 等指标是否符合 Runbook 要求
+- 步骤：
+  1. 运行 `make unlock-drill`，确保基础单元测试通过并生成 `docs/bench/reports/unlock-drill.md`
+  2. 执行 `ghz`（或自研压测器）并使用 `docs/bench/payloads/unlock.json`，设置 `-c 200 -z 5m`，让缓存集中失效
+  3. 观察 `/debug/unlock`、Prometheus 指标与日志中的 `x-unlock-request-id`，确认队列深度 < 1024、失败数 5 分钟内 < 10、`unlock_latency_ms p95 < 500ms`
+- 汇报：将 ghz JSON、Prometheus 抓取及 Grafana 截图放入 `docs/bench/reports/`，并更新 `unlock-drill.md`

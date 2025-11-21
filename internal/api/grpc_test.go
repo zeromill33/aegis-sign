@@ -4,15 +4,17 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	signerv1 "github.com/aegis-sign/wallet/docs/api/gen/go"
+	"github.com/aegis-sign/wallet/internal/app/backend/keycache"
 	"github.com/aegis-sign/wallet/pkg/apierrors"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 func TestGRPCSignValidatesDigest(t *testing.T) {
-	server := NewGRPCServer(&stubBackend{})
+	server := NewGRPCServer(&stubBackend{}, nil)
 	_, err := server.Sign(context.Background(), &signerv1.SignRequest{Digest: []byte{1}})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("expected invalid argument, got %v", status.Code(err))
@@ -24,7 +26,7 @@ func TestGRPCSignInvalidKey(t *testing.T) {
 		signFn: func(ctx context.Context, req *signerv1.SignRequest) (*signerv1.SignResponse, error) {
 			return nil, apierrors.New(apierrors.CodeInvalidKey, "unknown key")
 		},
-	})
+	}, nil)
 	_, err := server.Sign(context.Background(), &signerv1.SignRequest{Digest: repeatBytes(0x01, 32)})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected not found, got %v", status.Code(err))
@@ -37,7 +39,7 @@ func TestGRPCSignStream(t *testing.T) {
 			return &signerv1.SignResponse{Signature: req.GetDigest()}, nil
 		},
 	}
-	server := NewGRPCServer(backend)
+	server := NewGRPCServer(backend, nil)
 	stream := &fakeSignStream{
 		ctx: context.Background(),
 		reqs: []*signerv1.SignRequest{
@@ -54,6 +56,37 @@ func TestGRPCSignStream(t *testing.T) {
 	if !equalBytes(stream.sent[0].GetSignature(), repeatBytes(0x01, 32)) {
 		t.Fatalf("unexpected response payload")
 	}
+}
+
+func TestGRPCSignUnlockQueuesEvent(t *testing.T) {
+	queue := &testUnlockQueue{}
+	responder := NewUnlockResponder(UnlockResponderConfig{
+		Queue:    queue,
+		Keyspace: "prod",
+		MinRetry: 50 * time.Millisecond,
+		MaxRetry: 50 * time.Millisecond,
+	})
+	server := NewGRPCServer(&stubBackend{
+		signFn: func(context.Context, *signerv1.SignRequest) (*signerv1.SignResponse, error) {
+			return nil, keycache.NewUnlockRequiredError("dek", 0)
+		},
+	}, responder)
+	_, err := server.Sign(context.Background(), &signerv1.SignRequest{Digest: repeatBytes(0x01, 32), KeyId: "k-grpc"})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected unavailable, got %v", status.Code(err))
+	}
+	if queue.lastEvent.KeyID != "k-grpc" {
+		t.Fatalf("expected key recorded, got %s", queue.lastEvent.KeyID)
+	}
+}
+
+type testUnlockQueue struct {
+	lastEvent keycache.UnlockEvent
+}
+
+func (t *testUnlockQueue) NotifyUnlock(ctx context.Context, event keycache.UnlockEvent) error {
+	t.lastEvent = event
+	return nil
 }
 
 type fakeSignStream struct {

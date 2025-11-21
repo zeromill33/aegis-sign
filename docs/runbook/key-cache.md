@@ -25,6 +25,27 @@
 - 手动执行预刷新：调用 Key Manager 的 `ForceRefresh(keyID)`，该命令内部复用 `RefreshGroup.Do`，具备单航班保护。
 - 如需禁用预刷新器，可在配置中将 `maxInFlight=0`；务必同时收紧告警阈值以防软 TTL 集中触发。
 
+## 异步解锁（UNLOCK_REQUIRED）
+- 指标：
+  - `unlock_bg_rate{keyspace,reason}`：后台解锁吞吐；>200/s 持续 1 分钟需确认是否有批量失效
+  - `unlock_fail_total{reason}`：失败原因拆分，`reason="attestation"` 连续增大需关注 KMS/Attestation
+  - `unlock_latency_ms{keyspace}`：解锁耗时，p95 应 < 500ms
+  - `unlock_queue_depth`：队列深度；>1024 时触发 PagerDuty，参考 `/debug/unlock`
+  - `unlock_retry_total{reason}`：重试次数，>3 次需转人工
+- HTTP/gRPC 行为：
+  - 当 Sign 返回 503/`Unavailable`，客户端会收到 `Retry-After`（50–200ms）与 `X-Unlock-Request-Id`/`retry-after-ms` 元数据
+  - 依据 request id 可在网关日志与 `/debug/unlock` 中关联具体任务
+- `/debug/unlock`：实时查看 worker 数、inFlight keys、rate limit；必要情况下可增大 `UNLOCK_WORKERS` 或 `UNLOCK_RATE_LIMIT`
+- Mock KMS：如需在本地演练解锁流程，可设置 `UNLOCK_KMS_MOCK_KEY=<hex/plain>`，网关会使用 `internal/infra/kms/mockkms` 生成数据密钥并驱动 `unlock-drill`
+
+## 演练：`make unlock-drill`
+- `make unlock-drill` 会运行 `internal/gateway/unlock`/`internal/infra/kms` 的关键测试并将摘要写入 `docs/bench/reports/unlock-drill.md`
+- 演练步骤：
+  1. `SIGNER_ENCLAVES` 指向 staging 集群，临时收紧软/硬 TTL，确保 1% 请求进入 `UNLOCK_REQUIRED`
+  2. 运行 `make unlock-drill`，随后执行 `ghz -d @docs/bench/payloads/unlock.json ...` 重放失效场景
+  3. 观察 `unlock_queue_depth`、`unlock_fail_total`、`retry-after-ms` 是否维持在经验范围（<1024、5 分钟内 <10 次失败）
+  4. 将输出附加到 `docs/bench/reports/unlock-drill.md` 并附图（Grafana 截图）
+
 ## PromQL/Grafana 示例
 - “Soft 过期等待数”面板：
   ```promql

@@ -56,6 +56,9 @@ message ErrorStatus {
 
 service SignerService {
   rpc Create(CreateRequest) returns (CreateResponse);
+  // Sign 在返回 UNLOCK_REQUIRED 时会附带 metadata：
+  // - retry-after-ms: string (毫秒)
+  // - x-unlock-request-id: string
   rpc Sign(SignRequest) returns (SignResponse);
   rpc SignStream(stream SignRequest) returns (stream SignResponse);
 }

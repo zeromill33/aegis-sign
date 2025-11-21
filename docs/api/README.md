@@ -10,7 +10,7 @@
 - 错误码映射：
   - INVALID_ARGUMENT → 400 / gRPC `InvalidArgument`
   - RETRY_LATER → 429 / gRPC `ResourceExhausted`（强制附带 `Retry-After`）
-  - UNLOCK_REQUIRED → 503 / gRPC `Unavailable`（强制附带 `Retry-After`）
+  - UNLOCK_REQUIRED → 503 / gRPC `Unavailable`（强制附带 `Retry-After` + `x-unlock-request-id`）
   - INVALID_KEY → 404/409 / gRPC `NotFound`（keyId 不存在/状态不允许）
 
 ## OpenAPI
@@ -60,6 +60,7 @@ grpcurl -plaintext -d '{"key_id":"k1","digest":"AAAAAAAA..."}' \
 - 生成（手工维护）Go stub：`docs/api/gen/go/signer`，`go test ./...` 会校验 schema、错误码映射与 digest 验证逻辑
 - 运行 `make test` 或 `go test ./...` 可完成 API 合约回归
 
-## Retry 语义
-- `Retry-After` 必填于 RETRY_LATER 与 UNLOCK_REQUIRED，单位秒或 HTTP 日期
-- 建议客户端退避范围 50–200ms（带抖动），并在 `429` 情况下本地重试不超过 2 次
+## Retry / Unlock 语义
+- `Retry-After` 必填于 RETRY_LATER 与 UNLOCK_REQUIRED，默认值为 **50–200 ms** 抖动范围；HTTP 头部会返回秒级小数，JSON `retryAfterHint` 返回毫秒数
+- UNLOCK_REQUIRED 还会附加 `X-Unlock-Request-Id`（HTTP Header）或 `x-unlock-request-id`/`retry-after-ms`（gRPC metadata），用于将客户端重试与后台异步解锁任务对齐
+- 建议客户端在收到 503/`Unavailable` 时使用 `retry-after-ms` 作为初始退避，并在 3 次失败后落地人工介入；429 情况下本地重试不超过 2 次

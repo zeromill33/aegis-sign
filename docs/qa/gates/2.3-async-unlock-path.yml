@@ -1,0 +1,52 @@
+schema: 1
+story: '2.3'
+story_title: '异步解锁路径（UNLOCK_REQUIRED 冷路径）'
+gate: 'FAIL'
+status_reason: 'HTTP/gRPC 与文档已更新，但 key cache 未接入 UnlockNotifier 且解锁执行器仍为 Noop，核心 AC 仍缺失。'
+reviewer: 'Quinn (Test Architect)'
+updated: '2025-11-21T07:55:00Z'
+waiver: { active: false }
+top_issues:
+  - title: 'RefreshGroup/UnlockNotifier 仍未接入实际 key cache 实例'
+    severity: high
+    suggested_owner: dev
+    description: 'internal/app/backend/keycache/refresh_group.go:16-129 新增 notifier，但没有任何生产代码以 WithUnlockNotifier 构造 RefreshGroup，UNLOCK_REQUIRED error 永远不会入队。'
+    refs: ['internal/app/backend/keycache/refresh_group.go']
+  - title: 'Unlock 执行器仍为 Noop，未调用 KMS/Enclave'
+    severity: high
+    suggested_owner: dev
+    description: 'cmd/signer-api/main.go:108-113 使用 unlock.NewNoopExecutor，且项目中没有对 internal/infra/kms.NewClient 的引用，AC2（KMS + Attestation）尚未实现。'
+    refs: ['cmd/signer-api/main.go', 'internal/infra/kms/client.go']
+  - title: '缺少 Story 要求的集成/演练验证'
+    severity: medium
+    suggested_owner: dev
+    description: '虽然新增 make unlock-drill 与文档，但尚未完成 fake KMS + fake Enclave + Story 2.2 stub 的集成测试或 p95 指标校验。'
+    refs: ['docs/stories/2.3.async-unlock-path.md', 'docs/bench/README.md']
+quality_score: 60
+expires: '2025-12-05T07:35:00Z'
+evidence:
+  tests_reviewed: 2
+  risks_identified: 3
+  trace:
+    ac_covered: [4]
+    ac_gaps: [1, 2, 3]
+nfr_validation:
+  security:
+    status: FAIL
+    notes: 'Noop executor 未触发 Attestation/KMS 校验，冷路径安全性仍未检验。'
+  performance:
+    status: FAIL
+    notes: 'Key cache 未触发异步队列，无法验证 10ms 入队、50–200ms 抖动及 `unlock_latency_ms` SLO。'
+  reliability:
+    status: FAIL
+    notes: 'UNLOCK_REQUIRED 仍停留在同步错误路径，没有真正的后台解锁回写。'
+  maintainability:
+    status: CONCERNS
+    notes: 'unlock/kms 包仍为孤立模块，需要尽快整合以避免死代码。'
+recommendations:
+  immediate:
+    - action: '以 unlock dispatcher/Executor 构建 UnlockNotifier 并注入 RefreshGroup，确保 ErrUnlockRequired 能入队并回写统计'
+      refs: ['internal/app/backend/keycache/refresh_group.go', 'cmd/signer-api/main.go']
+    - action: '实现真实 KMS + Enclave 解锁执行器（使用 internal/infra/kms 客户端），并完善 fake KMS/Enclave 集成测试与 unlock_drill 演练'
+      refs: ['cmd/signer-api/main.go', 'internal/infra/kms/client.go', 'docs/bench/README.md']
+  future: []

@@ -37,7 +37,7 @@ paths:
       summary: 使用 keyId 对 32B 摘要进行签名
       tags: [signer]
       description: |
-        `POST /sign` 仅接受 32B `digest`；非 32B 直接返回 INVALID_ARGUMENT/400。request-id/tenant-id 头部默认禁用，仅审计模式启用。
+        `POST /sign` 仅接受 32B `digest`；非 32B 直接返回 INVALID_ARGUMENT/400。发生 `UNLOCK_REQUIRED` 时会在 HTTP 头部附带 `Retry-After`（50–200ms 抖动）与 `X-Unlock-Request-Id`，用于追踪后台解锁任务。
       parameters:
         - $ref: '#/components/parameters/RequestId'
         - $ref: '#/components/parameters/TenantId'
@@ -139,7 +139,7 @@ components:
           type: string
         retryAfterHint:
           type: string
-          description: 当需要退避时提供建议值（与 `Retry-After` 一致）
+          description: 当需要退避时提供建议值（毫秒值，UNLOCK_REQUIRED 默认 50–200ms 范围）
     HexDigest:
       type: string
       description: Hex64 表达的 32 字节摘要
@@ -173,6 +173,9 @@ components:
         Retry-After:
           schema: { type: string }
           description: 建议的退避时间（秒/HTTP 日期）
+        X-Unlock-Request-Id:
+          schema: { type: string }
+          description: 后台异步解锁任务 ID（与指标/日志关联）
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

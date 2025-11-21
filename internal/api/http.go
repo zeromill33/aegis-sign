@@ -1,10 +1,13 @@
 package signerapi
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	signerv1 "github.com/aegis-sign/wallet/docs/api/gen/go"
 	"github.com/aegis-sign/wallet/pkg/apierrors"
@@ -14,14 +17,15 @@ import (
 // HTTPHandler 实现 `/create` `/sign` HTTP/JSON 接口。
 type HTTPHandler struct {
 	backend Backend
+	unlock  *UnlockResponder
 }
 
 // NewHTTPHandler 构造 HTTP handler。
-func NewHTTPHandler(backend Backend) *HTTPHandler {
+func NewHTTPHandler(backend Backend, unlock *UnlockResponder) *HTTPHandler {
 	if backend == nil {
 		panic("signer backend is required")
 	}
-	return &HTTPHandler{backend: backend}
+	return &HTTPHandler{backend: backend, unlock: unlock}
 }
 
 // Register 将 handler 注册到 mux。
@@ -123,13 +127,17 @@ func (h *HTTPHandler) handleSign(w http.ResponseWriter, r *http.Request) {
 		h.writeAPIError(w, apierrors.New(apierrors.CodeInvalidArgument, err.Error()))
 		return
 	}
-	resp, err := h.backend.Sign(r.Context(), &signerv1.SignRequest{
+	ctx := r.Context()
+	resp, err := h.backend.Sign(ctx, &signerv1.SignRequest{
 		KeyId:        body.KeyID,
 		Digest:       decoded,
 		Encoding:     convertEncoding(encoding),
 		AuditContext: convertAuditHeaders(body.AuditHeaders),
 	})
 	if err != nil {
+		if h.tryHandleUnlock(w, ctx, body.KeyID, err) {
+			return
+		}
 		h.writeUnknownError(w, err)
 		return
 	}
@@ -163,19 +171,66 @@ func (h *HTTPHandler) writeAPIError(w http.ResponseWriter, apiErr *apierrors.Err
 	if status == 0 {
 		status = http.StatusInternalServerError
 	}
-	if apierrors.RequiresRetryAfter(apiErr.Code) {
-		if hint := apiErr.RetryAfterHint(); hint != "" {
-			w.Header().Set("Retry-After", hint)
-		}
-	}
 	resp := errorResponse{
 		Code:    string(apiErr.Code),
 		Message: apiErr.Error(),
 	}
 	if hint := apiErr.RetryAfterHint(); hint != "" {
 		resp.RetryAfterHint = hint
+		if apierrors.RequiresRetryAfter(apiErr.Code) && w.Header().Get("Retry-After") == "" {
+			w.Header().Set("Retry-After", hint)
+		}
 	}
 	h.writeJSON(w, status, resp)
+}
+
+func (h *HTTPHandler) tryHandleUnlock(w http.ResponseWriter, ctx context.Context, keyID string, err error) bool {
+	if h == nil {
+		return false
+	}
+	apiErr, ok := apierrors.FromError(err)
+	if !ok || apiErr.Code != apierrors.CodeUnlockRequired {
+		return false
+	}
+	meta := UnlockMetadata{RetryAfter: 100 * time.Millisecond}
+	if h.unlock != nil {
+		meta = h.unlock.Handle(ctx, keyID, err)
+	}
+	retry := meta.RetryAfter
+	if retry <= 0 {
+		retry = 100 * time.Millisecond
+	}
+	setUnlockHeaders(w, meta.RequestID, retry)
+	resp := errorResponse{
+		Code:           string(apiErr.Code),
+		Message:        apiErr.Error(),
+		RetryAfterHint: formatRetryAfterHint(retry),
+	}
+	h.writeJSON(w, http.StatusServiceUnavailable, resp)
+	return true
+}
+
+func setUnlockHeaders(w http.ResponseWriter, requestID string, retry time.Duration) {
+	if retry <= 0 {
+		retry = 100 * time.Millisecond
+	}
+	if requestID != "" {
+		w.Header().Set("X-Unlock-Request-Id", requestID)
+	}
+	w.Header().Set("Retry-After", formatRetryAfterHeader(retry))
+}
+
+func formatRetryAfterHeader(d time.Duration) string {
+	seconds := float64(d) / float64(time.Second)
+	return strconv.FormatFloat(seconds, 'f', 3, 64)
+}
+
+func formatRetryAfterHint(d time.Duration) string {
+	ms := d.Milliseconds()
+	if ms <= 0 {
+		ms = 100
+	}
+	return strconv.FormatInt(ms, 10)
 }
 
 func convertEncoding(enc validator.DigestEncoding) signerv1.DigestEncoding {
